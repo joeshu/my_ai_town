@@ -78,8 +78,22 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$BUILD_DIR"
+          # Godot 4.4 invokes an internal xcodebuild archive during iOS export.
+          # That archive may fail on the unsigned macOS runner after the Xcode
+          # project has already been generated (signing identity conflict).
+          # Keep the generated project and perform the unsigned build below.
+          set +e
           "$GODOT" --headless --path "$PROJECT_DIR" --export-release "$EXPORT_PRESET" "../${BUILD_DIR}/${APP_NAME}.xcodeproj"
-          test -d "${BUILD_DIR}/${APP_NAME}.xcodeproj" || { echo "Xcode project was not exported" >&2; find build -maxdepth 4 -print >&2; exit 1; }
+          GODOT_EXPORT_STATUS=$?
+          set -e
+          if [[ ! -d "${BUILD_DIR}/${APP_NAME}.xcodeproj" ]]; then
+            echo "Xcode project was not exported (Godot status: ${GODOT_EXPORT_STATUS})" >&2
+            find build -maxdepth 4 -print >&2
+            exit 1
+          fi
+          if [[ "$GODOT_EXPORT_STATUS" -ne 0 ]]; then
+            echo "Godot internal archive failed, but Xcode project exists; continuing with explicit unsigned build." >&2
+          fi
 
       - name: Build unsigned .app
         working-directory: ${{ env.BUILD_DIR }}
