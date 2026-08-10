@@ -117,12 +117,13 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
+            -derivedDataPath "${PWD}/derived-data" \
             build | tee ../../xcodebuild.log
 
       - name: Package LiveContainer unsigned IPA
         run: |
           set -euo pipefail
-          APP_PATH="$(find "$BUILD_DIR" -path '*/Release-iphoneos/*.app' -type d -print -quit)"
+          APP_PATH="$(find "$BUILD_DIR/derived-data" -path '*/Build/Products/Release-iphoneos/*.app' -type d -print -quit)"
           if [[ -z "$APP_PATH" ]]; then
             echo "No .app produced" >&2
             find "$BUILD_DIR" -maxdepth 6 -print >&2
