@@ -1,0 +1,132 @@
+name: ios-livecontainer-unsigned
+
+on:
+  workflow_dispatch:
+    inputs:
+      godot_version:
+        description: Godot version used for export
+        required: true
+        default: 4.4.1
+      app_name:
+        description: Output app / ipa basename
+        required: true
+        default: my-ai-town
+  push:
+    branches: [main]
+    paths:
+      - game/**
+      - .github/workflows/ios-livecontainer-unsigned.yml
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ios-livecontainer-unsigned-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-unsigned-ipa:
+    name: Build unsigned IPA for LiveContainer
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    env:
+      GODOT_VERSION: ${{ inputs.godot_version || '4.4.1' }}
+      APP_NAME: ${{ inputs.app_name || 'my-ai-town' }}
+      EXPORT_PRESET: iOS
+      PROJECT_DIR: game
+      BUILD_DIR: build/ios
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Godot editor and iOS templates
+        run: |
+          set -euo pipefail
+          GODOT_ZIP="Godot_v${GODOT_VERSION}-stable_macos.universal.zip"
+          TEMPLATES_TPZ="Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          BASE_URL="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable"
+
+          curl -fL --retry 3 --retry-delay 5 -o "${GODOT_ZIP}" "${BASE_URL}/${GODOT_ZIP}"
+          unzip -q "${GODOT_ZIP}" -d godot-bin
+          GODOT_APP="$(find godot-bin -maxdepth 1 -name 'Godot*.app' -print -quit)"
+          if [[ -z "${GODOT_APP}" ]]; then
+            echo "Godot app not found after unzip" >&2
+            find godot-bin -maxdepth 2 -print >&2
+            exit 1
+          fi
+          GODOT="${GODOT_APP}/Contents/MacOS/Godot"
+          echo "GODOT=${GODOT}" >> "$GITHUB_ENV"
+          "${GODOT}" --version
+
+          mkdir -p "${HOME}/Library/Application Support/Godot/export_templates/${GODOT_VERSION}.stable"
+          curl -fL --retry 3 --retry-delay 5 -o "${TEMPLATES_TPZ}" "${BASE_URL}/${TEMPLATES_TPZ}"
+          unzip -q "${TEMPLATES_TPZ}" -d templates-tpz
+          cp templates-tpz/templates/ios.zip "${HOME}/Library/Application Support/Godot/export_templates/${GODOT_VERSION}.stable/ios.zip"
+
+      - name: Import project once
+        run: |
+          set -euo pipefail
+          "$GODOT" --headless --path "$PROJECT_DIR" --import --quit
+
+      - name: Export iOS Xcode project
+        run: |
+          set -euo pipefail
+          mkdir -p "$BUILD_DIR"
+          "$GODOT" --headless --path "$PROJECT_DIR" --export-release "$EXPORT_PRESET" "../${BUILD_DIR}/${APP_NAME}.xcodeproj"
+          test -d "${BUILD_DIR}/${APP_NAME}.xcodeproj" || { echo "Xcode project was not exported" >&2; find build -maxdepth 4 -print >&2; exit 1; }
+
+      - name: Build unsigned .app
+        working-directory: ${{ env.BUILD_DIR }}
+        run: |
+          set -euo pipefail
+          SCHEME="$(xcodebuild -list -json -project "${APP_NAME}.xcodeproj" | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("project",{}).get("schemes") or [""])[0])')"
+          if [[ -z "$SCHEME" ]]; then
+            echo "No Xcode scheme found" >&2
+            xcodebuild -list -project "${APP_NAME}.xcodeproj" >&2
+            exit 1
+          fi
+          echo "Using scheme: $SCHEME"
+          xcodebuild \
+            -project "${APP_NAME}.xcodeproj" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            build | tee ../../xcodebuild.log
+
+      - name: Package LiveContainer unsigned IPA
+        run: |
+          set -euo pipefail
+          APP_PATH="$(find "$BUILD_DIR" -path '*/Release-iphoneos/*.app' -type d -print -quit)"
+          if [[ -z "$APP_PATH" ]]; then
+            echo "No .app produced" >&2
+            find "$BUILD_DIR" -maxdepth 6 -print >&2
+            exit 1
+          fi
+          rm -rf Payload "${APP_NAME}-livecontainer-unsigned.ipa"
+          mkdir Payload
+          cp -R "$APP_PATH" "Payload/${APP_NAME}.app"
+          /usr/bin/zip -qry "${APP_NAME}-livecontainer-unsigned.ipa" Payload
+          unzip -l "${APP_NAME}-livecontainer-unsigned.ipa" | tee ipa-contents.txt
+          test -s "${APP_NAME}-livecontainer-unsigned.ipa"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-livecontainer-unsigned-ipa
+          path: |
+            ${{ env.APP_NAME }}-livecontainer-unsigned.ipa
+            ipa-contents.txt
+            xcodebuild.log
+          if-no-files-found: error
